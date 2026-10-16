@@ -1,4 +1,5 @@
 """Anthropic Claude API wrapper with rolling history and retry logic."""
+import inspect
 import os
 import time
 
@@ -34,6 +35,10 @@ class Chatbot:
         self.max_history = max_history  # number of messages kept (user + assistant)
         self.history: list[dict[str, str]] = []
 
+        # Maintain compatibility across Anthropic SDK versions (v0.x vs v1.x+)
+        sig = inspect.signature(self.client.messages.create)
+        self._supports_direct_temp = "temperature" in sig.parameters
+
     def ask(self, user_message: str) -> str:
         """Send user message, receive assistant reply, and update history."""
         self.history.append({"role": "user", "content": user_message})
@@ -48,15 +53,21 @@ class Chatbot:
 
     def _call_api(self, messages: list[dict[str, str]], retries: int = 3) -> str:
         """Call Claude API with retries and exponential backoff for transient errors."""
+        kwargs = {
+            "model": self.model,
+            "system": self.system,
+            "messages": messages,
+            "max_tokens": self.max_tokens,
+        }
+        if self.temperature is not None:
+            if self._supports_direct_temp:
+                kwargs["temperature"] = self.temperature
+            else:
+                kwargs["extra_body"] = {"temperature": self.temperature}
+
         for attempt in range(retries):
             try:
-                resp = self.client.messages.create(
-                    model=self.model,
-                    system=self.system,
-                    messages=messages,
-                    temperature=self.temperature,
-                    max_tokens=self.max_tokens,
-                )
+                resp = self.client.messages.create(**kwargs)
                 return "".join(b.text for b in resp.content if b.type == "text").strip()
             except (RateLimitError, APIConnectionError):
                 if attempt < retries - 1:
